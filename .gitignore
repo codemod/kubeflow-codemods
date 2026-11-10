@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Test files that get transformed (generated outputs under tests/input/)
+**/tests/input/*
+
+# Build artifacts
+dist/
+tmp/
+
+# System files
+.DS_Store
+**/.DS_Store
+
+# Editors / local
+.idea/
+.vscode/
+*.swp
+.DS_Store
+.env
+.env.*

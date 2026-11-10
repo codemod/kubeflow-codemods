@@ -1,0 +1,11 @@
+{
+  "kfp-get-pipeline-id-namespace": [
+    {
+      "cardinality": {
+        "change-type": "skipped-unresolved",
+        "method": "get_pipeline_id"
+      },
+      "count": 1
+    }
+  ]
+}

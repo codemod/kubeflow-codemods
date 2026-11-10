@@ -1,0 +1,11 @@
+{
+  "kfp-get-pipeline-by-name-namespace": [
+    {
+      "cardinality": {
+        "change-type": "skipped-ambiguous",
+        "surface": "request"
+      },
+      "count": 1
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "kubeflow-codemods",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Official Kubeflow Pipelines migration codemods",
+  "type": "module",
+  "scripts": {
+    "test": "pnpm --filter \"./codemods/*\" test",
+    "check-types": "tsc --noEmit",
+    "ci": "pnpm run test && pnpm run check-types",
+    "validate": "pnpm --filter \"./codemods/*\" exec -- codemod workflow validate workflow.yaml"
+  },
+  "devDependencies": {
+    "@codemod.com/jssg-types": "catalog:",
+    "@types/node": "catalog:",
+    "codemod": "^1.12.3",
+    "typescript": "catalog:"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.19.0"
+}

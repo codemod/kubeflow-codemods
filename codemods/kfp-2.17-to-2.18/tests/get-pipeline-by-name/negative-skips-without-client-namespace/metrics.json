@@ -1,0 +1,18 @@
+{
+  "kfp-get-pipeline-by-name-namespace": [
+    {
+      "cardinality": {
+        "change-type": "skipped-unresolved",
+        "surface": "request"
+      },
+      "count": 1
+    },
+    {
+      "cardinality": {
+        "change-type": "skipped-unresolved",
+        "surface": "rest-url"
+      },
+      "count": 1
+    }
+  ]
+}

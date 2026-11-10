@@ -1,0 +1,11 @@
+{
+  "kfp-upload-pipeline-namespace": [
+    {
+      "cardinality": {
+        "change-type": "added-namespace",
+        "method": "upload_pipeline_from_pipeline_func"
+      },
+      "count": 1
+    }
+  ]
+}

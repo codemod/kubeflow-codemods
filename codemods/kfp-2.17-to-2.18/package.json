@@ -1,0 +1,15 @@
+{
+  "name": "kfp-2.17-to-2.18",
+  "version": "0.1.0",
+  "description": "KFP 2.17 to 2.18 — add explicit namespaces for private pipeline lookup and upload APIs",
+  "type": "module",
+  "scripts": {
+    "test": "codemod jssg test -l python ./scripts/add-namespace-get-pipeline-id.ts ./tests/get-pipeline-id && codemod jssg test -l python ./scripts/add-namespace-get-pipeline-by-name.ts ./tests/get-pipeline-by-name && codemod jssg test -l python ./scripts/add-namespace-upload-pipeline.ts ./tests/upload-pipeline",
+    "test:get-pipeline-id": "codemod jssg test -l python ./scripts/add-namespace-get-pipeline-id.ts ./tests/get-pipeline-id",
+    "test:get-pipeline-by-name": "codemod jssg test -l python ./scripts/add-namespace-get-pipeline-by-name.ts ./tests/get-pipeline-by-name",
+    "test:upload-pipeline": "codemod jssg test -l python ./scripts/add-namespace-upload-pipeline.ts ./tests/upload-pipeline"
+  },
+  "devDependencies": {
+    "@codemod.com/jssg-types": "catalog:"
+  }
+}

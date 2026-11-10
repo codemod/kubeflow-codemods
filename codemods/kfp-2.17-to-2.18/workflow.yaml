@@ -1,0 +1,166 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/codemod/codemod/refs/heads/main/schemas/workflow.json
+
+version: '1'
+
+params:
+  schema:
+    commit_per_step:
+      name: Commit per step
+      type: boolean
+      default: false
+      description: Commit after each change-producing step with a meaningful message
+    run_ai_step:
+      name: Run AI step
+      type: boolean
+      default: false
+      description: Run AI step for unresolved private-pipeline namespace cases
+    publish_pr:
+      name: Publish PR
+      type: boolean
+      default: false
+      description: Push branch and create PR (off by default)
+    main_branch:
+      name: Main branch
+      type: string
+      default: 'main'
+      description: Target branch for PR
+    api_token:
+      name: API token
+      type: string
+      description: GitHub API token when gh CLI unavailable
+      secret: true
+    pr_title:
+      name: PR title
+      type: string
+      description: Optional PR title
+    pr_body:
+      name: PR body
+      type: string
+      description: Optional PR body
+      multi_line: true
+
+nodes:
+  - id: apply-transforms
+    name: Apply AST Transformations
+    type: automatic
+    steps:
+      - name: 'Add namespace to get_pipeline_id calls'
+        js-ast-grep:
+          js_file: scripts/add-namespace-get-pipeline-id.ts
+          language: 'python'
+          base_path: '.'
+          include:
+            - '**/*.py'
+          exclude:
+            - '**/node_modules/**'
+            - '**/vendor/**'
+            - '**/__pycache__/**'
+            - '**/.venv/**'
+            - '**/venv/**'
+            - '**/*_test.py'
+            - '**/test_*.py'
+      - name: 'Commit get_pipeline_id namespace fixes'
+        run: |
+          git add -A
+          [ -n "$(git status --porcelain)" ] && git commit -m "fix: add explicit namespace to kfp.Client.get_pipeline_id calls" || true
+        if: params.commit_per_step
+
+      - name: 'Add namespace to direct GetPipelineByName requests'
+        js-ast-grep:
+          js_file: scripts/add-namespace-get-pipeline-by-name.ts
+          language: 'python'
+          base_path: '.'
+          include:
+            - '**/*.py'
+          exclude:
+            - '**/node_modules/**'
+            - '**/vendor/**'
+            - '**/__pycache__/**'
+            - '**/.venv/**'
+            - '**/venv/**'
+            - '**/*_test.py'
+            - '**/test_*.py'
+      - name: 'Commit GetPipelineByName namespace fixes'
+        run: |
+          git add -A
+          [ -n "$(git status --porcelain)" ] && git commit -m "fix: add explicit namespace to direct GetPipelineByName lookups" || true
+        if: params.commit_per_step
+
+      - name: 'Add namespace to private pipeline uploads'
+        js-ast-grep:
+          js_file: scripts/add-namespace-upload-pipeline.ts
+          language: 'python'
+          base_path: '.'
+          include:
+            - '**/*.py'
+          exclude:
+            - '**/node_modules/**'
+            - '**/vendor/**'
+            - '**/__pycache__/**'
+            - '**/.venv/**'
+            - '**/venv/**'
+            - '**/*_test.py'
+            - '**/test_*.py'
+      - name: 'Commit upload_pipeline namespace fixes'
+        run: |
+          git add -A
+          [ -n "$(git status --porcelain)" ] && git commit -m "fix: add explicit namespace to kfp.Client.upload_pipeline calls" || true
+        if: params.commit_per_step
+
+  - id: ai-tricky-cases
+    name: AI Tricky Cases
+    type: automatic
+    depends_on: [apply-transforms]
+    steps:
+      - name: 'AI step for unresolved private-pipeline namespaces'
+        if: params.run_ai_step
+        ai:
+          prompt: |
+            You are performing a Kubeflow Pipelines 2.17→2.18 client migration. Modify files directly.
+
+            Goal: For private pipelines, ensure namespace is explicit on lookup and upload APIs when a
+            statically resolvable owning namespace exists in surrounding configuration.
+
+            Handle these tricky cases:
+            1. Clients constructed with a namespace variable that is itself a constant string assigned
+               in the same file (for example `NS = "team-a"; client = kfp.Client(namespace=NS)`).
+            2. Direct REST/gRPC GetPipelineByName helpers that share a nearby configured namespace but
+               were skipped by the AST step.
+            3. Attribute-held clients such as `self._client = kfp.Client(namespace="team-a")` when
+               calls use `self._client.get_pipeline_id(...)` / `upload_pipeline(...)`.
+            4. Do NOT invent namespaces from pipeline names, env vars, repo names, or cluster defaults.
+            5. Do NOT convert intentional shared-pipeline lookups/uploads (no owning namespace) into
+               private ones.
+            6. Leave a `# TODO(kfp-2.18): supply owning namespace for private pipeline` comment when
+               private intent is clear but the namespace cannot be resolved safely.
+
+            Constraints: Preserve pipeline IDs, auth, and formatting. Prefer keyword `namespace=`.
+            Skip ambiguous aliases. Keep changes localized and reviewable.
+          system_prompt: |
+            You are a Kubeflow Pipelines SDK migration expert focused on the 2.18 private-pipeline
+            namespace requirements. Prefer no change over an incorrect namespace.
+      - name: 'Commit AI fixes'
+        run: |
+          git add -A
+          [ -n "$(git status --porcelain)" ] && git commit -m "fix: AI-assisted KFP 2.18 private-pipeline namespace resolution" || true
+        if: params.commit_per_step
+
+  - id: publish
+    name: Publish Changes
+    type: automatic
+    depends_on: [ai-tricky-cases]
+    steps:
+      - name: 'Push branch to remote'
+        if: params.publish_pr
+        run: |
+          BRANCH=$(git branch --show-current)
+          git push -u origin "$BRANCH"
+      - name: 'Create PR to main branch'
+        if: params.publish_pr
+        run: |
+          BRANCH=$(git branch --show-current)
+          BASE="${PARAM_MAIN_BRANCH:-main}"
+          TITLE="${PARAM_PR_TITLE:-fix: KFP 2.18 explicit namespaces for private pipelines}"
+          BODY="${PARAM_PR_BODY:-Automated codemod: add explicit namespace arguments for private pipeline lookup and upload APIs.}"
+          [ -n "$PARAM_API_TOKEN" ] && export GITHUB_TOKEN="$PARAM_API_TOKEN"
+          gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body "$BODY"
