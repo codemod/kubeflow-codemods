@@ -1,7 +1,7 @@
 schema_version: '1.0'
 
 name: 'kfp-2-17-to-2-18'
-version: '0.1.0'
+version: '0.2.0'
 description: 'KFP 2.17 to 2.18 — explicit namespaces for private pipeline lookup, upload, version-by-name, and list APIs'
 author: 'Alex Bit <alex@codemod.com>'
 license: 'MIT'
