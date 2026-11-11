@@ -6,7 +6,7 @@ Migration codemods for [Kubeflow Pipelines](https://github.com/kubeflow/pipeline
 
 | Package | Description |
 | --- | --- |
-| [`kfp-2.17-to-2.18`](./codemods/kfp-2.17-to-2.18) | Add explicit namespaces for private pipeline lookup and upload APIs changed in KFP 2.18 |
+| [`kfp-2.17-to-2.18`](./codemods/kfp-2.17-to-2.18) | Add explicit namespaces for private pipeline lookup, upload, version-by-name, and list APIs changed in KFP 2.18 |
 
 ## Running
 

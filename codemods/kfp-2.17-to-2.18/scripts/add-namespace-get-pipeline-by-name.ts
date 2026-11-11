@@ -5,37 +5,46 @@ import { useMetricAtom } from "codemod:metrics";
 import {
   addNamespaceKeyword,
   getCallMethodName,
+  getCallReceiverText,
   getKeywordArg,
+  hasSharedIntentMarker,
+  isExecutableStringContext,
+  isPipelineByNamePath,
+  isPipelineUploadPath,
   pathAlreadyHasNamespace,
   readStringLiteral,
+  resolvePipelinesApiNamespaces,
+  uniqueNamespaceOrNull,
   uniqueResolvedNamespaces,
   withNamespaceQuery,
 } from "./shared.ts";
 
 // Cardinalities:
-//   change-type: "added-namespace" | "skipped-unresolved" | "skipped-existing" | "skipped-ambiguous"
+//   change-type: "added-namespace" | "skipped-unresolved" | "skipped-existing" | "skipped-ambiguous" | "skipped-shared-intent"
 //   surface: "request" | "python-client" | "rest-url"
 
 const metric = useMetricAtom("kfp-get-pipeline-by-name-namespace");
 
+function unresolvedOrAmbiguous(
+  fileNamespace: string | null,
+  clientNamespaceCount: number,
+): "skipped-unresolved" | "skipped-ambiguous" {
+  if (fileNamespace === null && clientNamespaceCount > 1) {
+    return "skipped-ambiguous";
+  }
+  return "skipped-unresolved";
+}
+
 const codemod: Codemod<Python> = async (root) => {
   const rootNode = root.root();
-  const namespaces = uniqueResolvedNamespaces(rootNode);
   const edits: Edit[] = [];
 
-  if (namespaces.length > 1) {
-    metric.increment({
-      "change-type": "skipped-ambiguous",
-      surface: "request",
-    });
-    return null;
-  }
-
-  const namespace = namespaces[0];
-  if (!namespace) {
-    // No statically resolvable client namespace in this file.
-    // Still scan so metrics capture unresolved direct API usage.
-  }
+  // File-wide namespace only when exactly one Client namespace is resolvable.
+  // Per-call API receivers can still resolve via pipelines_api → client binding
+  // even when multiple client namespaces exist.
+  const fileNamespace = uniqueNamespaceOrNull(rootNode);
+  const clientNamespaceCount = uniqueResolvedNamespaces(rootNode).length;
+  const apiNamespaces = resolvePipelinesApiNamespaces(rootNode);
 
   // 1) GetPipelineByNameRequest(...)
   const requestCalls = rootNode.findAll({
@@ -54,6 +63,14 @@ const codemod: Codemod<Python> = async (root) => {
       continue;
     }
 
+    if (hasSharedIntentMarker(call)) {
+      metric.increment({
+        "change-type": "skipped-shared-intent",
+        surface: "request",
+      });
+      continue;
+    }
+
     if (getKeywordArg(call, "namespace")) {
       metric.increment({
         "change-type": "skipped-existing",
@@ -62,15 +79,23 @@ const codemod: Codemod<Python> = async (root) => {
       continue;
     }
 
-    if (!namespace) {
+    if (!fileNamespace) {
       metric.increment({
-        "change-type": "skipped-unresolved",
+        "change-type": unresolvedOrAmbiguous(
+          fileNamespace,
+          clientNamespaceCount,
+        ),
         surface: "request",
       });
       continue;
     }
 
-    const edit = addNamespaceKeyword(call, namespace, rootNode, Number.POSITIVE_INFINITY);
+    const edit = addNamespaceKeyword(
+      call,
+      fileNamespace,
+      rootNode,
+      Number.POSITIVE_INFINITY,
+    );
     if (!edit) {
       continue;
     }
@@ -103,6 +128,14 @@ const codemod: Codemod<Python> = async (root) => {
       continue;
     }
 
+    if (hasSharedIntentMarker(call)) {
+      metric.increment({
+        "change-type": "skipped-shared-intent",
+        surface: "python-client",
+      });
+      continue;
+    }
+
     if (getKeywordArg(call, "namespace")) {
       metric.increment({
         "change-type": "skipped-existing",
@@ -111,15 +144,29 @@ const codemod: Codemod<Python> = async (root) => {
       continue;
     }
 
+    const receiver = getCallReceiverText(call);
+    const namespace =
+      (receiver ? apiNamespaces.get(receiver) : undefined) ??
+      fileNamespace ??
+      null;
+
     if (!namespace) {
       metric.increment({
-        "change-type": "skipped-unresolved",
+        "change-type": unresolvedOrAmbiguous(
+          fileNamespace,
+          clientNamespaceCount,
+        ),
         surface: "python-client",
       });
       continue;
     }
 
-    const edit = addNamespaceKeyword(call, namespace, rootNode, Number.POSITIVE_INFINITY);
+    const edit = addNamespaceKeyword(
+      call,
+      namespace,
+      rootNode,
+      Number.POSITIVE_INFINITY,
+    );
     if (!edit) {
       continue;
     }
@@ -131,11 +178,28 @@ const codemod: Codemod<Python> = async (root) => {
     });
   }
 
-  // 3) Static REST strings containing /apis/v2beta1/pipelines/names/
+  // 3) Static REST strings for by-name lookup or pipeline upload, only in
+  // executable contexts (assignment RHS / call args), and only when the file
+  // has a unique client namespace.
   const strings = rootNode.findAll({ rule: { kind: "string" } });
   for (const stringNode of strings) {
     const value = readStringLiteral(stringNode);
-    if (!value || !value.includes("/apis/v2beta1/pipelines/names/")) {
+    if (
+      !value ||
+      (!isPipelineByNamePath(value) && !isPipelineUploadPath(value))
+    ) {
+      continue;
+    }
+
+    if (!isExecutableStringContext(stringNode)) {
+      continue;
+    }
+
+    if (hasSharedIntentMarker(stringNode)) {
+      metric.increment({
+        "change-type": "skipped-shared-intent",
+        surface: "rest-url",
+      });
       continue;
     }
 
@@ -147,25 +211,26 @@ const codemod: Codemod<Python> = async (root) => {
       continue;
     }
 
-    if (!namespace) {
+    if (!fileNamespace) {
       metric.increment({
-        "change-type": "skipped-unresolved",
+        "change-type": unresolvedOrAmbiguous(
+          fileNamespace,
+          clientNamespaceCount,
+        ),
         surface: "rest-url",
       });
       continue;
     }
 
-    const updated = withNamespaceQuery(value, namespace);
+    const updated = withNamespaceQuery(value, fileNamespace);
     if (!updated) {
       continue;
     }
 
-    const quote = stringNode.text()[0] === "'" ? "'" : '"';
-    // Preserve the original quote character from the literal's opening delimiter.
     const raw = stringNode.text();
     const prefixMatch = raw.match(/^([rRuUbB]*)(['"])/);
     const prefix = prefixMatch?.[1] ?? "";
-    const q = (prefixMatch?.[2] as '"' | "'" | undefined) ?? quote;
+    const q = (prefixMatch?.[2] as '"' | "'" | undefined) ?? '"';
     edits.push(stringNode.replace(`${prefix}${q}${updated}${q}`));
     metric.increment({
       "change-type": "added-namespace",

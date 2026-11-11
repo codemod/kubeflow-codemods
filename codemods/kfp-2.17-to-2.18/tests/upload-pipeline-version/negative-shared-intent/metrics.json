@@ -1,0 +1,11 @@
+{
+  "kfp-upload-pipeline-version-namespace": [
+    {
+      "cardinality": {
+        "change-type": "skipped-shared-intent",
+        "method": "upload_pipeline_version"
+      },
+      "count": 1
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "kfp-list-pipelines-namespace": [
+    {
+      "cardinality": {
+        "change-type": "skipped-shared-intent",
+        "method": "list_pipelines"
+      },
+      "count": 1
+    }
+  ]
+}

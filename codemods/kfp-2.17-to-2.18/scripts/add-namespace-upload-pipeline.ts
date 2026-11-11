@@ -6,11 +6,12 @@ import {
   addNamespaceKeyword,
   getCallMethodName,
   getCallReceiverText,
+  hasSharedIntentMarker,
   resolveClientNamespaces,
 } from "./shared.ts";
 
 // Cardinalities:
-//   change-type: "added-namespace" | "skipped-unresolved" | "skipped-existing"
+//   change-type: "added-namespace" | "skipped-unresolved" | "skipped-existing" | "skipped-shared-intent"
 //   method: "upload_pipeline" | "upload_pipeline_from_pipeline_func"
 
 const metric = useMetricAtom("kfp-upload-pipeline-namespace");
@@ -43,6 +44,14 @@ const codemod: Codemod<Python> = async (root) => {
   for (const call of calls) {
     const method = getCallMethodName(call);
     if (!method || !UPLOAD_METHODS.has(method)) {
+      continue;
+    }
+
+    if (hasSharedIntentMarker(call)) {
+      metric.increment({
+        "change-type": "skipped-shared-intent",
+        method,
+      });
       continue;
     }
 

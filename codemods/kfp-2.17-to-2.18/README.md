@@ -8,19 +8,36 @@ See the upstream [2.18 upgrade guide](https://github.com/kubeflow/pipelines/blob
 
 In KFP 2.18:
 
-- `kfp.Client.get_pipeline_id()` does **not** inherit `Client(namespace=...)`. Omitting `namespace` searches shared pipelines only.
+- `kfp.Client.get_pipeline_id()` / `list_pipelines()` do **not** inherit `Client(namespace=...)`. Omitting `namespace` searches shared pipelines only.
 - Direct pipeline-by-name REST/gRPC lookups (`/apis/v2beta1/pipelines/names/`, `GetPipelineByName`, `pipeline_service_get_pipeline_by_name`) must supply the owning namespace for private pipelines.
 - `upload_pipeline()` / `upload_pipeline_from_pipeline_func()` likewise require an explicit `namespace=` for private uploads; the client default is not used.
+- `upload_pipeline_version(..., pipeline_name=...)` resolves the parent via shared-only `get_pipeline_id` — private parents need a namespaced lookup then `pipeline_id=`.
+- `namespace="kubeflow"` creates a **private** pipeline in that namespace; it is not shared visibility.
 
 ## Solution
 
-This package runs three deterministic JSSG steps:
+This package runs five deterministic JSSG steps:
 
-1. **get_pipeline_id** — copy a statically resolvable `Client(..., namespace="...")` value onto matching `get_pipeline_id(...)` calls that omit it.
-2. **GetPipelineByName** — when a file has exactly one statically resolvable client namespace, add it to `GetPipelineByNameRequest`, `pipeline_service_get_pipeline_by_name`, and static REST URL strings.
-3. **upload_pipeline** — add the same client namespace to private upload helpers that omit it.
+1. **get_pipeline_id** — copy a statically resolvable `Client(..., namespace=...)` value onto matching `get_pipeline_id(...)` calls that omit it.
+2. **GetPipelineByName** — add namespace to `GetPipelineByNameRequest`, `pipeline_service_get_pipeline_by_name`, and executable static REST URLs (by-name + upload). Per-API bindings work across multi-client files; unbound requests abort only when namespaces are ambiguous.
+3. **upload_pipeline** — add the client namespace to private upload helpers that omit it.
+4. **upload_pipeline_version** — rewrite `pipeline_name=` to `pipeline_id=<receiver>.get_pipeline_id(..., namespace=...)`.
+5. **list_pipelines** — same per-receiver heuristic as `get_pipeline_id`.
+
+Namespace resolution covers string literals, same-file constants (`NS = "team-a"`), and attribute-held clients (`self._client = Client(...)`).
 
 Calls without a statically resolvable owning namespace are left unchanged for manual review (optional AI step).
+
+### Shared vs private intent
+
+Auto-add assumes private intent when a Client namespace is statically resolvable. To keep a call **shared**, mark it:
+
+```python
+# kfp-shared
+client.upload_pipeline(...)
+```
+
+Accepted markers: `# kfp-shared`, `# kfp:shared`, `# intentional shared` (same line or previous line).
 
 ## Usage
 
@@ -53,13 +70,15 @@ npx codemod@latest jssg run -l python \
 - `kfp-get-pipeline-id-namespace`
 - `kfp-get-pipeline-by-name-namespace`
 - `kfp-upload-pipeline-namespace`
+- `kfp-upload-pipeline-version-namespace`
+- `kfp-list-pipelines-namespace`
 
-Cardinalities include `change-type` (`added-namespace`, `skipped-unresolved`, `skipped-existing`, `skipped-ambiguous`) plus method/surface tags.
+Cardinalities include `change-type` (`added-namespace`, `rewrote-pipeline-name`, `skipped-unresolved`, `skipped-existing`, `skipped-ambiguous`, `skipped-shared-intent`) plus method/surface tags.
 
 ## Tricky cases (`run_ai_step=true`)
 
-- Namespace passed through a local constant (`NS = "team-a"`) rather than a string literal in `Client(...)`
-- Attribute-held clients (`self.client = ...`)
+- Factory helpers / re-exported clients without a direct `Client(...)` assignment
+- Dynamic REST URLs / multi-tenant ambiguity the AST skipped
 - Clear private-pipeline intent without a safe static namespace (emit a TODO comment; never invent one)
 
 ## What gets fixed
@@ -68,28 +87,43 @@ Cardinalities include `change-type` (`added-namespace`, `skipped-unresolved`, `s
 
 ```python
 # before
-client = kfp.Client(namespace="team-a")
+NS = "team-a"
+client = kfp.Client(namespace=NS)
 client.get_pipeline_id("training")
 client.upload_pipeline(pipeline_package_path="p.yaml", pipeline_name="training")
+client.upload_pipeline_version(
+    pipeline_package_path="p.yaml",
+    pipeline_version_name="v2",
+    pipeline_name="training",
+)
+client.list_pipelines()
 GetPipelineByNameRequest(name="training")
 
 # after
-client = kfp.Client(namespace="team-a")
+NS = "team-a"
+client = kfp.Client(namespace=NS)
 client.get_pipeline_id("training", namespace="team-a")
 client.upload_pipeline(
     pipeline_package_path="p.yaml",
     pipeline_name="training",
     namespace="team-a",
 )
+client.upload_pipeline_version(
+    pipeline_package_path="p.yaml",
+    pipeline_version_name="v2",
+    pipeline_id=client.get_pipeline_id("training", namespace="team-a"),
+)
+client.list_pipelines(namespace="team-a")
 GetPipelineByNameRequest(name="training", namespace="team-a")
 ```
 
 ### Skipped
 
-- Existing `namespace=` arguments
+- Existing `namespace=` / `pipeline_id=` arguments
 - Clients whose namespace is dynamic (`os.environ`, function calls, …)
-- Files with multiple distinct client namespaces (GetPipelineByName step)
-- Intentional shared-pipeline usage (no resolvable private owning namespace)
+- Unbound GetPipelineByNameRequest / REST when multiple distinct client namespaces exist
+- Intentional shared usage marked with `# kfp-shared` (or aliases above)
+- REST path strings only in docstrings / non-executable contexts
 
 ## License
 

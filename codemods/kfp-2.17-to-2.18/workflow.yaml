@@ -44,6 +44,7 @@ nodes:
     name: Apply AST Transformations
     type: automatic
     steps:
+      # Include test_*.py / *_test.py: GetPipelineByName is a hard break often covered in tests.
       - name: 'Add namespace to get_pipeline_id calls'
         js-ast-grep:
           js_file: scripts/add-namespace-get-pipeline-id.ts
@@ -57,8 +58,6 @@ nodes:
             - '**/__pycache__/**'
             - '**/.venv/**'
             - '**/venv/**'
-            - '**/*_test.py'
-            - '**/test_*.py'
       - name: 'Commit get_pipeline_id namespace fixes'
         run: |
           git add -A
@@ -78,8 +77,6 @@ nodes:
             - '**/__pycache__/**'
             - '**/.venv/**'
             - '**/venv/**'
-            - '**/*_test.py'
-            - '**/test_*.py'
       - name: 'Commit GetPipelineByName namespace fixes'
         run: |
           git add -A
@@ -99,12 +96,48 @@ nodes:
             - '**/__pycache__/**'
             - '**/.venv/**'
             - '**/venv/**'
-            - '**/*_test.py'
-            - '**/test_*.py'
       - name: 'Commit upload_pipeline namespace fixes'
         run: |
           git add -A
           [ -n "$(git status --porcelain)" ] && git commit -m "fix: add explicit namespace to kfp.Client.upload_pipeline calls" || true
+        if: params.commit_per_step
+
+      - name: 'Rewrite upload_pipeline_version pipeline_name to namespaced pipeline_id'
+        js-ast-grep:
+          js_file: scripts/add-namespace-upload-pipeline-version.ts
+          language: 'python'
+          base_path: '.'
+          include:
+            - '**/*.py'
+          exclude:
+            - '**/node_modules/**'
+            - '**/vendor/**'
+            - '**/__pycache__/**'
+            - '**/.venv/**'
+            - '**/venv/**'
+      - name: 'Commit upload_pipeline_version namespace fixes'
+        run: |
+          git add -A
+          [ -n "$(git status --porcelain)" ] && git commit -m "fix: resolve private upload_pipeline_version parents via namespaced get_pipeline_id" || true
+        if: params.commit_per_step
+
+      - name: 'Add namespace to list_pipelines calls'
+        js-ast-grep:
+          js_file: scripts/add-namespace-list-pipelines.ts
+          language: 'python'
+          base_path: '.'
+          include:
+            - '**/*.py'
+          exclude:
+            - '**/node_modules/**'
+            - '**/vendor/**'
+            - '**/__pycache__/**'
+            - '**/.venv/**'
+            - '**/venv/**'
+      - name: 'Commit list_pipelines namespace fixes'
+        run: |
+          git add -A
+          [ -n "$(git status --porcelain)" ] && git commit -m "fix: add explicit namespace to kfp.Client.list_pipelines calls" || true
         if: params.commit_per_step
 
   - id: ai-tricky-cases
@@ -121,18 +154,21 @@ nodes:
             Goal: For private pipelines, ensure namespace is explicit on lookup and upload APIs when a
             statically resolvable owning namespace exists in surrounding configuration.
 
-            Handle these tricky cases:
-            1. Clients constructed with a namespace variable that is itself a constant string assigned
-               in the same file (for example `NS = "team-a"; client = kfp.Client(namespace=NS)`).
-            2. Direct REST/gRPC GetPipelineByName helpers that share a nearby configured namespace but
-               were skipped by the AST step.
-            3. Attribute-held clients such as `self._client = kfp.Client(namespace="team-a")` when
-               calls use `self._client.get_pipeline_id(...)` / `upload_pipeline(...)`.
-            4. Do NOT invent namespaces from pipeline names, env vars, repo names, or cluster defaults.
-            5. Do NOT convert intentional shared-pipeline lookups/uploads (no owning namespace) into
-               private ones.
-            6. Leave a `# TODO(kfp-2.18): supply owning namespace for private pipeline` comment when
+            The AST steps already handle: Client(namespace="...") and Client(namespace=NS) with
+            NS = "..." in the same file, attribute-held clients (self._client), GetPipelineByName /
+            REST / pipeline_service_get_pipeline_by_name, upload_pipeline*, upload_pipeline_version
+            pipeline_name→pipeline_id, and list_pipelines. Prefer leaving those alone.
+
+            Handle remaining tricky cases:
+            1. Factory helpers / re-exports that still have a clear static owning namespace nearby.
+            2. Direct REST/gRPC helpers the AST skipped (dynamic URLs, multi-tenant ambiguity).
+            3. Do NOT invent namespaces from pipeline names, env vars, repo names, or cluster defaults.
+            4. Do NOT convert intentional shared-pipeline lookups/uploads into private ones.
+               Honor `# kfp-shared` / `# kfp:shared` / `# intentional shared` markers.
+            5. Leave a `# TODO(kfp-2.18): supply owning namespace for private pipeline` comment when
                private intent is clear but the namespace cannot be resolved safely.
+            6. For medium-confidence private migrations, prefer
+               `# TODO(kfp-2.18): confirm private vs shared intent` over inventing scope.
 
             Constraints: Preserve pipeline IDs, auth, and formatting. Prefer keyword `namespace=`.
             Skip ambiguous aliases. Keep changes localized and reviewable.

@@ -1,0 +1,11 @@
+{
+  "kfp-upload-pipeline-version-namespace": [
+    {
+      "cardinality": {
+        "change-type": "rewrote-pipeline-name",
+        "method": "upload_pipeline_version"
+      },
+      "count": 1
+    }
+  ]
+}

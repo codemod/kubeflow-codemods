@@ -1,0 +1,18 @@
+{
+  "kfp-get-pipeline-by-name-namespace": [
+    {
+      "cardinality": {
+        "change-type": "added-namespace",
+        "surface": "python-client"
+      },
+      "count": 1
+    },
+    {
+      "cardinality": {
+        "change-type": "skipped-ambiguous",
+        "surface": "request"
+      },
+      "count": 1
+    }
+  ]
+}

@@ -32,7 +32,7 @@ registry:
 
 Parse `workflow.yaml`. Execution order:
 
-1. `apply-transforms` — three sequential `js-ast-grep` steps (get_pipeline_id → GetPipelineByName → upload_pipeline), each with an optional commit gated by `params.commit_per_step`
+1. `apply-transforms` — five sequential `js-ast-grep` steps (get_pipeline_id → GetPipelineByName → upload_pipeline → upload_pipeline_version → list_pipelines), each with an optional commit gated by `params.commit_per_step`
 2. `ai-tricky-cases` — depends on `apply-transforms`; AI step gated by `params.run_ai_step`
 3. `publish` — depends on `ai-tricky-cases`; push/PR gated by `params.publish_pr`
 
@@ -41,6 +41,7 @@ Parse `workflow.yaml`. Execution order:
 - Adjust `include` / `exclude` globs if the target repo keeps Python clients outside `**/*.py` defaults (for example notebooks exported as `.py` under generated folders).
 - Do not broaden namespace inference to environment variables, cluster defaults, or pipeline names.
 - Shared helpers live in `scripts/shared.ts`; keep Client-resolution logic there when touching more than one step script.
+- Honor `# kfp-shared` / `# kfp:shared` / `# intentional shared` markers — do not rewrite those call sites to private scope.
 
 ## Step-by-step execution
 
@@ -54,4 +55,4 @@ Parse `workflow.yaml`. Execution order:
 
 ## AI steps
 
-Treat the AI prompt as guidance for unresolved but intentional private-pipeline call sites. Prefer a TODO comment over inventing a namespace. Do not modify intentional shared-pipeline lookups or uploads.
+Treat the AI prompt as guidance for unresolved but intentional private-pipeline call sites. Prefer a TODO comment over inventing a namespace. Do not modify intentional shared-pipeline lookups or uploads (including `# kfp-shared` markers).

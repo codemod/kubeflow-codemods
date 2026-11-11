@@ -4,6 +4,11 @@ import type Python from "codemod:ast-grep/langs/python";
 export type PyNode = SgNode<Python>;
 
 const PIPELINE_BY_NAME_PATH = "/apis/v2beta1/pipelines/names/";
+const PIPELINE_UPLOAD_PATH = "/apis/v2beta1/pipelines/upload";
+
+/** Marker comments that mean "leave this call shared (omit namespace)". */
+const SHARED_INTENT_RE =
+  /#\s*(kfp-shared|kfp:shared|intentional\s+shared)\b/i;
 
 /** Collect Client constructor aliases and kfp module aliases from imports. */
 export function collectImportAliases(root: PyNode): {
@@ -99,6 +104,73 @@ export function readStringLiteral(node: PyNode | null | undefined): string | nul
   return match[2] ?? null;
 }
 
+/**
+ * Map simple identifier assignments to static string literals in the file.
+ * Used so `NS = "team-a"; Client(namespace=NS)` resolves.
+ */
+export function resolveStringConstants(root: PyNode): Map<string, string> {
+  const constants = new Map<string, string>();
+  const ambiguous = new Set<string>();
+
+  for (const assignment of root.findAll({ rule: { kind: "assignment" } })) {
+    const left = assignment.field("left");
+    const right = assignment.field("right");
+    if (!left || !right || left.kind() !== "identifier") {
+      continue;
+    }
+
+    const name = left.text();
+    if (!name) {
+      continue;
+    }
+
+    const literal = readStringLiteral(right);
+    if (literal === null || literal.length === 0) {
+      if (constants.has(name) || ambiguous.has(name)) {
+        ambiguous.add(name);
+        constants.delete(name);
+      }
+      continue;
+    }
+
+    const existing = constants.get(name);
+    if (existing !== undefined && existing !== literal) {
+      ambiguous.add(name);
+      constants.delete(name);
+      continue;
+    }
+
+    if (ambiguous.has(name)) {
+      continue;
+    }
+
+    constants.set(name, literal);
+  }
+
+  return constants;
+}
+
+/** Resolve a namespace expression: string literal or same-file string constant. */
+export function resolveNamespaceExpression(
+  node: PyNode | null | undefined,
+  stringConstants: Map<string, string>,
+): string | null {
+  if (!node) {
+    return null;
+  }
+
+  const literal = readStringLiteral(node);
+  if (literal !== null) {
+    return literal.length > 0 ? literal : null;
+  }
+
+  if (node.kind() === "identifier") {
+    return stringConstants.get(node.text()) ?? null;
+  }
+
+  return null;
+}
+
 export function getKeywordArg(call: PyNode, name: string): PyNode | null {
   const args = call.field("arguments");
   if (!args) {
@@ -111,6 +183,25 @@ export function getKeywordArg(call: PyNode, name: string): PyNode | null {
     }
     if (child.field("name")?.text() === name) {
       return child.field("value") ?? null;
+    }
+  }
+
+  return null;
+}
+
+/** Return the keyword_argument node itself (not just its value). */
+export function getKeywordArgNode(call: PyNode, name: string): PyNode | null {
+  const args = call.field("arguments");
+  if (!args) {
+    return null;
+  }
+
+  for (const child of args.children()) {
+    if (child.kind() !== "keyword_argument") {
+      continue;
+    }
+    if (child.field("name")?.text() === name) {
+      return child;
     }
   }
 
@@ -148,12 +239,43 @@ export function hasPositionalNamespace(
   return positionals.length >= namespacePosition;
 }
 
+function trackNamespaceBinding(
+  namespaces: Map<string, string>,
+  ambiguous: Set<string>,
+  receiver: string,
+  namespace: string | null,
+): void {
+  if (!namespace || namespace.length === 0) {
+    ambiguous.add(receiver);
+    namespaces.delete(receiver);
+    return;
+  }
+
+  const existing = namespaces.get(receiver);
+  if (existing !== undefined && existing !== namespace) {
+    ambiguous.add(receiver);
+    namespaces.delete(receiver);
+    return;
+  }
+
+  if (ambiguous.has(receiver)) {
+    return;
+  }
+
+  namespaces.set(receiver, namespace);
+}
+
 /**
  * Map receiver expression text -> statically resolved nonempty namespace.
+ * Supports:
+ * - `client = Client(namespace="team-a")`
+ * - `client = Client(namespace=NS)` when `NS = "team-a"` in the same file
+ * - `self._client = Client(namespace="team-a")` (attribute-held clients)
  * Ambiguous reassignments are omitted.
  */
 export function resolveClientNamespaces(root: PyNode): Map<string, string> {
   const { kfpModules, clientCtors } = collectImportAliases(root);
+  const stringConstants = resolveStringConstants(root);
   const namespaces = new Map<string, string>();
   const ambiguous = new Set<string>();
 
@@ -185,33 +307,71 @@ export function resolveClientNamespaces(root: PyNode): Map<string, string> {
     }
 
     const namespaceNode = getKeywordArg(right, "namespace");
-    const namespace = readStringLiteral(namespaceNode);
-    if (!namespace || namespace.length === 0) {
-      ambiguous.add(receiver);
-      namespaces.delete(receiver);
-      continue;
-    }
-
-    const existing = namespaces.get(receiver);
-    if (existing !== undefined && existing !== namespace) {
-      ambiguous.add(receiver);
-      namespaces.delete(receiver);
-      continue;
-    }
-
-    if (ambiguous.has(receiver)) {
-      continue;
-    }
-
-    namespaces.set(receiver, namespace);
+    const namespace = resolveNamespaceExpression(namespaceNode, stringConstants);
+    trackNamespaceBinding(namespaces, ambiguous, receiver, namespace);
   }
 
   return namespaces;
 }
 
+/**
+ * Map pipeline-API object text -> namespace when assigned from a Client, e.g.
+ * `pipelines_api = client._pipelines_api`.
+ */
+export function resolvePipelinesApiNamespaces(root: PyNode): Map<string, string> {
+  const clientNamespaces = resolveClientNamespaces(root);
+  const apiNamespaces = new Map<string, string>();
+  const ambiguous = new Set<string>();
+
+  for (const assignment of root.findAll({ rule: { kind: "assignment" } })) {
+    const left = assignment.field("left");
+    const right = assignment.field("right");
+    if (!left || !right || left.kind() === "pattern_list") {
+      continue;
+    }
+
+    const receiver = left.text();
+    if (!receiver) {
+      continue;
+    }
+
+    if (right.kind() !== "attribute") {
+      if (apiNamespaces.has(receiver) || ambiguous.has(receiver)) {
+        ambiguous.add(receiver);
+        apiNamespaces.delete(receiver);
+      }
+      continue;
+    }
+
+    const attr = right.field("attribute")?.text();
+    const obj = right.field("object")?.text();
+    if (!obj || (attr !== "_pipelines_api" && attr !== "pipelines_api")) {
+      if (apiNamespaces.has(receiver) || ambiguous.has(receiver)) {
+        ambiguous.add(receiver);
+        apiNamespaces.delete(receiver);
+      }
+      continue;
+    }
+
+    const namespace = clientNamespaces.get(obj) ?? null;
+    trackNamespaceBinding(apiNamespaces, ambiguous, receiver, namespace);
+  }
+
+  return apiNamespaces;
+}
+
 /** Unique statically resolved client namespace values in the file, if any. */
 export function uniqueResolvedNamespaces(root: PyNode): string[] {
   return [...new Set(resolveClientNamespaces(root).values())];
+}
+
+/**
+ * Prefer a single file-wide namespace when unambiguous; otherwise null.
+ * Used for GetPipelineByNameRequest / REST when no per-receiver binding exists.
+ */
+export function uniqueNamespaceOrNull(root: PyNode): string | null {
+  const values = uniqueResolvedNamespaces(root);
+  return values.length === 1 ? (values[0] ?? null) : null;
 }
 
 export function getCallMethodName(call: PyNode): string | null {
@@ -248,6 +408,11 @@ function detectQuote(root: PyNode): '"' | "'" {
   return '"';
 }
 
+export function formatNamespaceKeyword(root: PyNode, namespace: string): string {
+  const quote = detectQuote(root);
+  return `namespace=${quote}${namespace}${quote}`;
+}
+
 /** Insert `namespace=<literal>` into a Python call's argument list. */
 export function addNamespaceKeyword(
   call: PyNode,
@@ -267,8 +432,7 @@ export function addNamespaceKeyword(
     return null;
   }
 
-  const quote = detectQuote(root);
-  const nsArg = `namespace=${quote}${namespace}${quote}`;
+  const nsArg = formatNamespaceKeyword(root, namespace);
   const argsText = args.text();
 
   if (argsText.includes("\n")) {
@@ -288,8 +452,68 @@ export function addNamespaceKeyword(
   return args.replace(`(${inner}, ${nsArg})`);
 }
 
+/**
+ * True when the call (or previous line) is marked as intentional shared usage.
+ * Markers: `# kfp-shared`, `# kfp:shared`, `# intentional shared`.
+ */
+export function hasSharedIntentMarker(node: PyNode): boolean {
+  const src = node.getRoot().root().text();
+  const start = node.range().start.index;
+
+  const lineStart = src.lastIndexOf("\n", start - 1) + 1;
+  const lineEndIdx = src.indexOf("\n", start);
+  const lineEnd = lineEndIdx === -1 ? src.length : lineEndIdx;
+  const line = src.slice(lineStart, lineEnd);
+  if (SHARED_INTENT_RE.test(line)) {
+    return true;
+  }
+
+  if (lineStart <= 0) {
+    return false;
+  }
+
+  const prevEnd = lineStart - 1;
+  const prevStart = src.lastIndexOf("\n", prevEnd - 1) + 1;
+  const prevLine = src.slice(prevStart, prevEnd);
+  return SHARED_INTENT_RE.test(prevLine);
+}
+
+/**
+ * True when a string node is used as an assignment RHS or call argument
+ * (not a docstring / unrelated literal elsewhere in the file).
+ */
+export function isExecutableStringContext(stringNode: PyNode): boolean {
+  for (const ancestor of stringNode.ancestors()) {
+    const kind = ancestor.kind();
+    if (kind === "assignment" || kind === "augmented_assignment") {
+      return true;
+    }
+    if (kind === "call" || kind === "keyword_argument") {
+      return true;
+    }
+    // Stop at statement-ish boundaries that are not executable string uses.
+    if (
+      kind === "expression_statement" ||
+      kind === "function_definition" ||
+      kind === "class_definition" ||
+      kind === "module"
+    ) {
+      // expression_statement wrapping a bare string is a docstring / noop.
+      if (kind === "expression_statement") {
+        return false;
+      }
+      break;
+    }
+  }
+  return false;
+}
+
 export function isPipelineByNamePath(value: string): boolean {
   return value.includes(PIPELINE_BY_NAME_PATH);
+}
+
+export function isPipelineUploadPath(value: string): boolean {
+  return value.includes(PIPELINE_UPLOAD_PATH);
 }
 
 export function pathAlreadyHasNamespace(value: string): boolean {
@@ -298,7 +522,10 @@ export function pathAlreadyHasNamespace(value: string): boolean {
 
 /** Append `namespace=` query param to a static REST pipeline-by-name URL. */
 export function withNamespaceQuery(url: string, namespace: string): string | null {
-  if (!isPipelineByNamePath(url) || pathAlreadyHasNamespace(url)) {
+  if (
+    (!isPipelineByNamePath(url) && !isPipelineUploadPath(url)) ||
+    pathAlreadyHasNamespace(url)
+  ) {
     return null;
   }
 
@@ -307,4 +534,34 @@ export function withNamespaceQuery(url: string, namespace: string): string | nul
   return `${url}${joiner}namespace=${encoded}`;
 }
 
-export { PIPELINE_BY_NAME_PATH };
+/**
+ * Rewrite `pipeline_name=<expr>` to
+ * `pipeline_id=<receiver>.get_pipeline_id(<expr>, namespace=<ns>)`.
+ */
+export function rewritePipelineNameToNamespacedId(
+  call: PyNode,
+  receiver: string,
+  namespace: string,
+  root: PyNode,
+): Edit | null {
+  if (hasKeywordArg(call, "pipeline_id")) {
+    return null;
+  }
+
+  const pipelineNameNode = getKeywordArgNode(call, "pipeline_name");
+  if (!pipelineNameNode) {
+    return null;
+  }
+
+  const nameValue = pipelineNameNode.field("value");
+  if (!nameValue) {
+    return null;
+  }
+
+  const nsArg = formatNamespaceKeyword(root, namespace);
+  return pipelineNameNode.replace(
+    `pipeline_id=${receiver}.get_pipeline_id(${nameValue.text()}, ${nsArg})`,
+  );
+}
+
+export { PIPELINE_BY_NAME_PATH, PIPELINE_UPLOAD_PATH };

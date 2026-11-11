@@ -1,0 +1,11 @@
+{
+  "kfp-list-pipelines-namespace": [
+    {
+      "cardinality": {
+        "change-type": "added-namespace",
+        "method": "list_pipelines"
+      },
+      "count": 1
+    }
+  ]
+}
